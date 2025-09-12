@@ -1,4 +1,4 @@
-#include <Adafruit_NeoPixel.h>
+#include <Adafruit_NeoPixel.h> //https://github.com/dedKRV/Color-Music-on-Python-and-Arduino-WS2812B-ESP32
 #define LED_PIN 16
 #define NUM_LEDS 300
 

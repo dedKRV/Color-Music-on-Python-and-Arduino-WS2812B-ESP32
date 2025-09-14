@@ -1,4 +1,4 @@
-import sys
+import sys #https://github.com/dedKRV/Color-Music-on-Python-and-Arduino-WS2812B-ESP32
 import json
 import numpy as np
 import sounddevice as sd
@@ -526,4 +526,5 @@ if __name__ == '__main__':
 
     window = LEDControl()
     window.show()
+
     sys.exit(app.exec_())

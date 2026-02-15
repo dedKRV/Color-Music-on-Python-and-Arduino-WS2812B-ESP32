@@ -80,26 +80,23 @@ void parseCommand(String data) {
 
 void updateGradient() {
     unsigned long currentTime = millis();
-    if (currentTime - lastGradientUpdate > (100 - config.gradient_speed)) {
+    if (currentTime - lastGradientUpdate > (110 - config.gradient_speed)) {
         lastGradientUpdate = currentTime;
         
         for (int i = 0; i < NUM_LEDS; i++) {
-            float pos = (config.gradient_pos / 100.0 + (float)i / NUM_LEDS);
-            pos = fmod(pos, 1.0);
+            // Плавное смещение градиента по всей ленте
+            float pos = fmod(config.gradient_pos + (float)i / NUM_LEDS, 1.0);
             
+            // Плавное смешивание цветов по всей длине
             uint32_t color;
-            if (pos < 0.33) {
-                float t = pos * 3.0;
+            if (pos < 0.5) {
+                float t = pos * 2.0;
                 color = interpolateColor(config.base_r, config.base_g, config.base_b,
                                        config.low_r, config.low_g, config.low_b, t);
-            } else if (pos < 0.66) {
-                float t = (pos - 0.33) * 3.0;
+            } else {
+                float t = (pos - 0.5) * 2.0;
                 color = interpolateColor(config.low_r, config.low_g, config.low_b,
                                        config.high_r, config.high_g, config.high_b, t);
-            } else {
-                float t = (pos - 0.66) * 3.0;
-                color = interpolateColor(config.high_r, config.high_g, config.high_b,
-                                       config.base_r, config.base_g, config.base_b, t);
             }
             
             strip.setPixelColor(i, color);
@@ -107,7 +104,7 @@ void updateGradient() {
         strip.show();
         
         // Автоматическое движение градиента
-        config.gradient_pos = fmod(config.gradient_pos + 0.5, 100.0);
+        config.gradient_pos = fmod(config.gradient_pos + 0.01, 1.0);
     }
 }
 

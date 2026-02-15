@@ -5,9 +5,10 @@ import sounddevice as sd
 from scipy.fftpack import fft
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QSlider,
                              QLabel, QHBoxLayout, QCheckBox, QPushButton,
-                             QGroupBox, QRadioButton, QColorDialog, QFrame)
+                             QGroupBox, QRadioButton, QColorDialog,
+                             QComboBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette, QFont
+from PyQt5.QtGui import QColor, QPalette, QLinearGradient, QPen, QPainter, QPainterPath
 import serial
 import time
 import os
@@ -19,12 +20,48 @@ FFT_SIZE = 1024
 MIN_LEVEL = 0.01
 
 
-class AudioThread(QThread):
-    data_updated = pyqtSignal(np.ndarray)
-
+class WaveformWidget(QWidget):
     def __init__(self):
         super().__init__()
+        self.setFixedHeight(100)
+        self.data = np.zeros(100)
+
+    def update_data(self, new_data):
+        self.data = new_data
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        gradient = QLinearGradient(0, 0, 0, self.height())
+        gradient.setColorAt(0, QColor(30, 0, 50))
+        gradient.setColorAt(1, QColor(60, 0, 100))
+        painter.fillRect(self.rect(), gradient)
+
+        painter.setPen(QPen(QColor(180, 100, 255), 2))
+
+        path = QPainterPath()
+        width = self.width()
+        height = self.height()
+
+        path.moveTo(0, height / 2)
+        for i in range(len(self.data)):
+            x = i * width / len(self.data)
+            y = height / 2 - self.data[i] * height / 2
+            path.lineTo(x, y)
+
+        painter.drawPath(path)
+
+
+class AudioThread(QThread):
+    data_updated = pyqtSignal(np.ndarray)
+    audio_data = pyqtSignal(np.ndarray)
+
+    def __init__(self, device_id=None):
+        super().__init__()
         self.running = False
+        self.device_id = device_id
 
     def run(self):
         self.running = True
@@ -33,6 +70,7 @@ class AudioThread(QThread):
                     samplerate=SAMPLE_RATE,
                     channels=1,
                     dtype='float32',
+                    device=self.device_id,
                     callback=self.audio_callback
             ) as stream:
                 while self.running:
@@ -42,6 +80,8 @@ class AudioThread(QThread):
 
     def audio_callback(self, indata, frames, time, status):
         if self.running and not status:
+            self.audio_data.emit(indata[:, 0])
+
             fft_data = np.abs(fft(indata[:, 0] * np.hamming(len(indata)), n=FFT_SIZE))
             self.data_updated.emit(fft_data)
 
@@ -53,28 +93,38 @@ class LEDControl(QWidget):
     def __init__(self):
         super().__init__()
         self.ser = None
-        self.audio_thread = AudioThread()
+        self.audio_thread = None
         self.default_config = {
             'mode': 0,
-            'base_color': (50, 0, 100),  # Фиолетовый по умолчанию
-            'low_color': (255, 0, 100),  # Розово-фиолетовый
-            'high_color': (100, 0, 255),  # Сине-фиолетовый
+            'base_color': (50, 0, 100),
+            'low_color': (255, 0, 100),
+            'high_color': (100, 0, 255),
             'low_cutoff': 60,
             'high_cutoff': 80,
-            'threshold': 0.1
+            'threshold': 0.1,
+            'gradient_speed': 50,
+            'gradient_pos': 0
         }
         self.config = self.default_config.copy()
+        self.input_devices = self.get_input_devices()
+        self.selected_device = None
 
         self.init_ui()
         self.connect_serial()
         self.load_config()
         self.apply_dark_theme()
 
+    def get_input_devices(self):
+        devices = []
+        for i, device in enumerate(sd.query_devices()):
+            if device['max_input_channels'] > 0:
+                devices.append((i, device['name']))
+        return devices
+
     def apply_dark_theme(self):
-        # Применяем темную тему с фиолетовыми акцентами
         dark_palette = QPalette()
         dark_palette.setColor(QPalette.Window, QColor(30, 30, 40))
-        dark_palette.setColor(QPalette.WindowText, QColor(220, 220, 255))
+        dark_palette.setColor(QPalette.WindowText, QColor(180, 180, 220))
         dark_palette.setColor(QPalette.Base, QColor(40, 40, 50))
         dark_palette.setColor(QPalette.AlternateBase, QColor(50, 50, 60))
         dark_palette.setColor(QPalette.ToolTipBase, QColor(100, 50, 150))
@@ -88,7 +138,6 @@ class LEDControl(QWidget):
 
         self.setPalette(dark_palette)
 
-        # Устанавливаем стиль для групп
         group_style = """
         QGroupBox {
             font-weight: bold;
@@ -174,66 +223,85 @@ class LEDControl(QWidget):
                 background: #8A2BE2;
                 border: 2px solid #8A2BE2;
             }}
+            QComboBox {{
+                background-color: #2A2A3A;
+                color: #DCDCF0;
+                border: 1px solid #6A0DAD;
+                border-radius: 4px;
+                padding: 5px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
             {group_style}
         """)
 
     def init_ui(self):
-        self.setWindowTitle('LED Music Controller - Dark Theme')
-        self.setGeometry(300, 300, 700, 600)
+        self.setWindowTitle('LED Music Controller - by dedKRV')
+        self.setGeometry(300, 300, 700, 800)
 
-        # Режимы работы
+        mic_layout = QHBoxLayout()
+        mic_layout.addWidget(QLabel("Микрофон:"))
+        self.mic_selector = QComboBox()
+        for idx, name in self.input_devices:
+            self.mic_selector.addItem(name, idx)
+        self.mic_selector.currentIndexChanged.connect(self.change_microphone)
+        mic_layout.addWidget(self.mic_selector)
+
         self.mode_group = QGroupBox("Режимы работы")
         self.mode1 = QRadioButton("Фоновый режим")
         self.mode2 = QRadioButton("Один диапазон")
         self.mode3 = QRadioButton("Два диапазона")
+        self.mode4 = QRadioButton("Режим градиента")
         self.mode1.setChecked(True)
 
         layout_modes = QHBoxLayout()
         layout_modes.addWidget(self.mode1)
         layout_modes.addWidget(self.mode2)
         layout_modes.addWidget(self.mode3)
+        layout_modes.addWidget(self.mode4)
         self.mode_group.setLayout(layout_modes)
 
-        # Цветовые кнопки
         self.base_color_btn = QPushButton('Фоновый цвет')
         self.low_color_btn = QPushButton('Низкие частоты')
         self.high_color_btn = QPushButton('Высокие частоты')
 
-        # Настройка цветов
         self.base_color_btn.clicked.connect(lambda: self.choose_color('base'))
         self.low_color_btn.clicked.connect(lambda: self.choose_color('low'))
         self.high_color_btn.clicked.connect(lambda: self.choose_color('high'))
 
-        # Частотные диапазоны
         self.low_cutoff = self.create_slider(40, 60, 'Низкие частоты (Гц):', 60)
         self.high_cutoff = self.create_slider(60, 80, 'Высокие частоты (Гц):', 70)
         self.threshold = self.create_slider(1, 100, 'Порог срабатывания (%):', 10)
 
-        # Управление
-        self.audio_toggle = QCheckBox('Включить аудио реакцию')
-        self.color_preview = QLabel()
-        self.color_preview.setFixedHeight(50)
-        self.color_preview.setStyleSheet("border: 2px solid #6A0DAD; border-radius: 5px;")
-        self.update_preview()
+        self.gradient_speed = self.create_slider(0, 100, 'Скорость градиента:', 50)
 
-        # Компоновка
+        self.waveform = WaveformWidget()
+
+        self.audio_toggle = QCheckBox('Включить аудио реакцию')
+
         layout = QVBoxLayout()
+        layout.addLayout(mic_layout)
         layout.addWidget(self.mode_group)
         layout.addWidget(self.create_color_group())
         layout.addWidget(self.create_freq_group())
+        layout.addWidget(self.create_gradient_group())
+        layout.addWidget(self.waveform)
         layout.addWidget(self.audio_toggle)
-        layout.addWidget(self.color_preview)
         layout.addStretch()
 
         self.setLayout(layout)
 
+        self.audio_thread = AudioThread()
         self.audio_thread.data_updated.connect(self.process_audio)
+        self.audio_thread.audio_data.connect(self.waveform.update_data)
+
         self.audio_toggle.stateChanged.connect(self.toggle_audio)
         self.mode1.toggled.connect(lambda: self.set_mode(0))
         self.mode2.toggled.connect(lambda: self.set_mode(1))
         self.mode3.toggled.connect(lambda: self.set_mode(2))
+        self.mode4.toggled.connect(lambda: self.set_mode(3))
 
-        # Инициализация цветов кнопок
         self.update_color_buttons()
 
     def create_color_group(self):
@@ -251,6 +319,13 @@ class LEDControl(QWidget):
         layout.addWidget(self.low_cutoff)
         layout.addWidget(self.high_cutoff)
         layout.addWidget(self.threshold)
+        group.setLayout(layout)
+        return group
+
+    def create_gradient_group(self):
+        group = QGroupBox("Настройки градиента")
+        layout = QVBoxLayout()
+        layout.addWidget(self.gradient_speed)
         group.setLayout(layout)
         return group
 
@@ -291,6 +366,16 @@ class LEDControl(QWidget):
         except Exception as e:
             print(f"SERIAL ERROR: {str(e)}")
 
+    def change_microphone(self, index):
+        device_id = self.mic_selector.itemData(index)
+        self.selected_device = device_id
+        if self.audio_thread and self.audio_thread.running:
+            self.audio_thread.stop()
+            self.audio_thread = AudioThread(device_id)
+            self.audio_thread.data_updated.connect(self.process_audio)
+            self.audio_thread.audio_data.connect(self.waveform.update_data)
+            self.audio_thread.start()
+
     def set_mode(self, mode):
         self.config['mode'] = mode
         self.send_full_update()
@@ -306,15 +391,6 @@ class LEDControl(QWidget):
             f"background-color: rgb({low_r}, {low_g}, {low_b}); color: white;")
         self.high_color_btn.setStyleSheet(
             f"background-color: rgb({high_r}, {high_g}, {high_b}); color: white;")
-
-        self.update_preview()
-
-    def update_preview(self):
-        base_r, base_g, base_b = self.config['base_color']
-        self.color_preview.setStyleSheet(
-            f"background-color: rgb({base_r}, {base_g}, {base_b}); "
-            f"border: 2px solid #6A0DAD; border-radius: 5px;"
-        )
 
     def choose_color(self, color_type):
         color = QColorDialog.getColor()
@@ -333,6 +409,7 @@ class LEDControl(QWidget):
         self.config['low_cutoff'] = self.low_cutoff.slider.value()
         self.config['high_cutoff'] = self.high_cutoff.slider.value()
         self.config['threshold'] = self.threshold.slider.value() / 100
+        self.config['gradient_speed'] = self.gradient_speed.slider.value()
         self.send_full_update()
 
     def process_audio(self, fft_data):
@@ -342,12 +419,10 @@ class LEDControl(QWidget):
             low_level = 0.0
             high_level = 0.0
 
-            if self.config['mode'] > 0:
-                # Низкие частоты
+            if self.config['mode'] > 0 and self.config['mode'] < 3:
                 low_mask = (freqs > 20) & (freqs < self.config['low_cutoff'])
                 low_level = np.mean(fft_data[low_mask]) / 100
 
-                # Высокие частоты (только для режима 2)
                 if self.config['mode'] == 2:
                     high_mask = (freqs > self.config['high_cutoff']) & (freqs < 100)
                     high_level = np.mean(fft_data[high_mask]) / 100
@@ -360,29 +435,45 @@ class LEDControl(QWidget):
     def send_to_leds(self, low_level, high_level):
         if self.ser and self.ser.is_open:
             try:
-                # Принудительная отправка фонового цвета при отсутствии сигнала
-                if low_level < MIN_LEVEL and high_level < MIN_LEVEL:
-                    command = f"B{self.config['base_color'][0]},{self.config['base_color'][1]},{self.config['base_color'][2]}\n"
-                else:
+                if self.config['mode'] == 3:
                     command = (
-                        f"M{self.config['mode']};"
+                        f"G{self.config['gradient_pos']};"
                         f"B{self.config['base_color'][0]},{self.config['base_color'][1]},{self.config['base_color'][2]};"
-                        f"L{self.config['low_color'][0]},{self.config['low_color'][1]},{self.config['low_color'][2]},{low_level};"
-                        f"H{self.config['high_color'][0]},{self.config['high_color'][1]},{self.config['high_color'][2]},{high_level};"
-                        f"T{self.config['threshold']}\n"
+                        f"L{self.config['low_color'][0]},{self.config['low_color'][1]},{self.config['low_color'][2]};"
+                        f"H{self.config['high_color'][0]},{self.config['high_color'][1]},{self.config['high_color'][2]};"
+                        f"S{self.config['gradient_speed']}\n"
                     )
+                else:
+                    if low_level < MIN_LEVEL and high_level < MIN_LEVEL:
+                        command = f"B{self.config['base_color'][0]},{self.config['base_color'][1]},{self.config['base_color'][2]}\n"
+                    else:
+                        command = (
+                            f"M{self.config['mode']};"
+                            f"B{self.config['base_color'][0]},{self.config['base_color'][1]},{self.config['base_color'][2]};"
+                            f"L{self.config['low_color'][0]},{self.config['low_color'][1]},{self.config['low_color'][2]},{low_level};"
+                            f"H{self.config['high_color'][0]},{self.config['high_color'][1]},{self.config['high_color'][2]},{high_level};"
+                            f"T{self.config['threshold']}\n"
+                        )
                 self.ser.write(command.encode())
             except Exception as e:
                 print(f"SERIAL WRITE ERROR: {str(e)}")
 
     def send_full_update(self):
-        self.send_to_leds(0, 0)  # Принудительное обновление всех параметров
+        self.send_to_leds(0, 0)
 
     def toggle_audio(self, state):
         if state == Qt.Checked:
+            if self.selected_device is not None:
+                self.audio_thread = AudioThread(self.selected_device)
+            else:
+                self.audio_thread = AudioThread()
+
+            self.audio_thread.data_updated.connect(self.process_audio)
+            self.audio_thread.audio_data.connect(self.waveform.update_data)
             self.audio_thread.start()
         else:
-            self.audio_thread.stop()
+            if self.audio_thread:
+                self.audio_thread.stop()
             self.send_full_update()
 
     def load_config(self):
@@ -391,19 +482,20 @@ class LEDControl(QWidget):
                 loaded_config = json.load(f)
                 self.config.update(loaded_config)
 
-            # Применяем настройки интерфейса
             self.low_cutoff.slider.setValue(self.config['low_cutoff'])
             self.high_cutoff.slider.setValue(self.config['high_cutoff'])
             self.threshold.slider.setValue(int(self.config['threshold'] * 100))
+            self.gradient_speed.slider.setValue(self.config['gradient_speed'])
             self.update_color_buttons()
 
-            # Устанавливаем режим
             if self.config['mode'] == 0:
                 self.mode1.setChecked(True)
             elif self.config['mode'] == 1:
                 self.mode2.setChecked(True)
             elif self.config['mode'] == 2:
                 self.mode3.setChecked(True)
+            elif self.config['mode'] == 3:
+                self.mode4.setChecked(True)
 
         except FileNotFoundError:
             print("Config file not found, using default settings")
@@ -420,16 +512,16 @@ class LEDControl(QWidget):
     def closeEvent(self, event):
         if self.ser and self.ser.is_open:
             self.ser.close()
-        self.audio_thread.stop()
+        if self.audio_thread:
+            self.audio_thread.stop()
         self.save_config()
         event.accept()
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    app.setStyle('Fusion')  # Используем Fusion стиль для лучшего отображения темной темы
+    app.setStyle('Fusion')
 
-    # Устанавливаем иконку приложения
     app.setApplicationName("LED Music Controller")
 
     window = LEDControl()
